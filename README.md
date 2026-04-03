@@ -10,21 +10,29 @@ This method has proven to be a good middle ground, as it's simplicity brings eas
 ### Level Finding
 This algorithm works way better for well structured, completely horizontal and plane environments, like apartments, buildings, and warehouses.
 
-* DCC and ICEX building at UFMG(mapped only done from the second floor)
+* DCC and ICEX building at UFMG(mapped only done from the second floor). Original point cloud and selected point cloud points for each level and heat maps showing the cross section for the levels:
 
-* Original point cloud:
-
-* Planes found in 2D(X and Y axis collapsed)
-
-* Points from the 2 levels found(different color for each level)
-
-* Resulting point clouds for level 1 and level 2, respectively
+![ICEX Cloud](./docs/icex_dcc_point_clouds.png)
 
 * Results using Tokyo's ward, Koto, point cloud
+
+![Koto Cloud](./docs/koto_ward_point_clouds.png)
+
+* Example of heat map from the DCC ICEX cloud, showing the levels found
+
+![ICEX heatmap](./docs/icex_heat_levels.png)
 
 ### Grid Making
 This program takes the level point cloud from the above program and turns into a sketch of a grid map from it, classifying cells as occupied or free.
 
+* Grid map from Koto ward
+
+![Koto Grid](./docs/koto_ward_L1.png)
+
+
+* Grid map from DCC and ICEX
+
+![DCC Grid](./docs/gravity_aligned_icex_L2.png)
 
 ## How to use it
 * Clone the repo:
@@ -43,27 +51,34 @@ git clone https://github.com/vtortega/Simple-Occupancy-Grid-from-Point-Cloud.git
     * `--below (meters)` After the planes are found, this sets the distance in which points **below** the point cloud will be included in the level cloud(This is not symmetric as the line is fitted to the floor/ceiling of the level)
     * `--above (meters)` After the planes are found, this sets the distance in which points **above** the point cloud will be included in the level cloud
 
-* Run the program with the desired `.pcd` file(**only binary `.pcd` files**). E.g.:
+* Run the program with the desired `.pcd` file path(**only binary `.pcd` files**). E.g.:
 ```
-python3 visualize_levels.py gravity_aligned_icex.pcd --threshold 0.7 --below 0.5 --above 2.0
+python3 visualize_levels.py ./data/gravity_aligned_icex.pcd --threshold 0.7 --below 0.5 --above 2.0
 ```
 
 ### Grid Making
 The automatic occupancy grid generated is not refined at all, that's why there is a manual inspection and modification step in which you can paint cells as occupied or not, soften the map, change the cell size and, finally, save the resulting `.png` file.
 
-* Just run the program with the desired point cloud from the level you prefer:
+* Just run the program with the desired point cloud from the level you prefer(It will be saved to the `grids` folder):
 ```
-python3 make_occupancy_grid.py gravity_aligned_icex_L2.pcd
+python3 make_occupancy_grid.py ./point_clouds/gravity_aligned_icex_L2.pcd
 ```
 
-* You have a few parameters to controll that are important to note:
+* You have a few important tools on the program:
     * Tool: Paint vs Bucket(Classical Paint functionalities)
     * Cell: If you will mark the clicked cells as occupied or as free.
     * Shape: Shape of the Paint brush you are using, square or round.
     * Brush size: pixel size of the brush.
     * Cell Size: the size of the cells on the grid. You can change this whenever you want
     * Soften: Automatically removes some isolated points and tries to round up the map. Good for a initial clearing of the cloud and to refine it a little(This algorithm deserver a little more attention and tunning)
-    * Save and Quit: Saves the grid map as `.png` on the current directory and quits the application.
+    * Save and Quit: Saves the grid map as `.png` on the `grids` directory(with the same name as the `.pcd` files passed when running the program) and quits the application.
+    * Frontier Layer: Considers every unkown cell that touches a free cell an obstacle, painting it as red.
+    * Remove Islands: Remove isolated free or obstacle cells. 3 options of removal are available: Removing all islands smaller then the biggest one, removing all islands proportianally smaller than the biggest one and removing islands by size:
+    
+        Pay attention to what kind of grid you are removing, below there are 2 examples, one removing free space and the other removing obstacle/unkown spaces, respectively:
+
+    ![Removing islands](./docs/removing_islands.png)
+    ![Removing islands koto](./docs/removing_islands_koto.png)
 
 
 ## How it Works
@@ -83,3 +98,7 @@ The grid is made in a similar way, but by collapsing the Z axis.It counts the nu
 * Usually, with lidar like the MID360, the level with the most points in a scan of a single level will be the ceiling of the level, so the `--num_levels 1` will end up selecting the ceiling instead of the floor. For this case it's recommended to use the `2` instead of `1` for the parameter value, so that the `L2` will be the floor you actually want. On the other side, if the scan was used using a drone, defining points of the major plane would be the actual floor, so L1 would probably be the correct one to use. But since the algorithm is so fast and shows visualizations of the selected points and planes, it can be worthwhile to test multiple parameters.
 
 * In the case of a top down scan, like the one made from drones, in which you just want the ground plane, you can pass a higher `--below` argument, as there won't be any points below the actual ground, so you will be able to select a bigger area of the ground, like small inclinations and such.
+
+# Sources
+
+[Really Cool Point Clouds from Tokyo](https://info.tokyo-digitaltwin.metro.tokyo.lg.jp/3dmodel/)

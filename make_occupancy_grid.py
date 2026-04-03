@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
 Generate and interactively edit a 2-D occupancy grid from a point cloud.
-Occupied cells are black; free cells are white.
 
 The cloud is projected onto the XY plane; per-cell density is pushed through
 a sigmoid (S-curve) that is normalised to the per-cloud maximum, so clouds
 with very different point counts behave consistently.
 
-  High density  → occupied (black)
-  Sparse density → free    (white)
-  Zero density   → occupied (black, unscanned / unknown region)
+Two-class initial output:
+  Low density   → free    (white)   value 0
+  High density  → unknown (black)   value 1
+  Zero density  → unknown (black)   value 1
+
+Optional frontier layer (button or L key):
+  Unknown cells that border a free cell → obstacle (red)   value 2
+  This creates a closed contour that encloses all free space.
 
 Usage:
     python3 make_occupancy_grid.py <file.pcd> [options]
@@ -19,10 +23,12 @@ Editor controls:
     Middle-click drag    pan
     Scroll wheel         zoom in / out
     P / B                switch tool: Paint / Bucket
-    O / F                cell type: Occupied / Free
+    F / U / O            cell type: Free / Unknown / Obstacle
     [ / ]                decrease / increase brush radius
     Ctrl+Z               undo
-    K                    soften (with confirmation)
+    K                    soften (strips + re-adds frontier layer automatically)
+    L                    add frontier / obstacle layer
+    I                    remove island free-space patches
     R                    reset view to full extent
     S                    save PNG and quit
     Q                    quit without saving
@@ -56,12 +62,14 @@ _C = dict(
     divider     = '#B0C4D8',   # separator lines
     txt_light   = '#FFFFFF',
     # buttons (idle, hover)
-    soften = ('#E65100', '#BF360C'),
-    undo   = ('#546E7A', '#37474F'),
-    save   = ('#2E7D32', '#1B5E20'),
-    quit   = ('#B71C1C', '#7F0000'),
-    go     = ('#1565C0', '#0D47A1'),
-    slider = '#90CAF9',
+    islands  = ('#00695C', '#004D40'),
+    frontier = ('#6A1B9A', '#4A148C'),
+    soften   = ('#E65100', '#BF360C'),
+    undo     = ('#546E7A', '#37474F'),
+    save     = ('#2E7D32', '#1B5E20'),
+    quit     = ('#B71C1C', '#7F0000'),
+    go       = ('#1565C0', '#0D47A1'),
+    slider   = '#90CAF9',
 )
 
 
@@ -179,11 +187,13 @@ def build_occupancy_grid(x, y, resolution, steepness, midpoint):
 
         occ_prob = sigmoid(steepness × (norm_density − midpoint))
 
-    Zero-return cells → occupied (unknown / unscanned region).
+    Zero-density cells → unknown (unscanned region).
+    High-density cells → unknown (wall / dense return).
+    Low-density cells  → free.
 
     Returns
     -------
-    grid  : uint8 (nrows × ncols),  0 = free,  1 = occupied
+    grid  : uint8 (nrows × ncols),  0 = free,  1 = unknown
     x_min, y_min : world coords of the grid origin (bottom-left corner)
     """
     x_min, x_max = x.min(), x.max()
@@ -202,6 +212,7 @@ def build_occupancy_grid(x, y, resolution, steepness, midpoint):
     if max_count == 0:
         return np.ones((nrows, ncols), dtype=np.uint8), x_min, y_min
 
+    # occ_prob defaults to 1.0 for zero-density cells (unknown)
     occ_prob = np.ones((nrows, ncols), dtype=np.float64)
     has_pts = counts > 0
     t = counts[has_pts] / max_count
@@ -254,7 +265,7 @@ def flood_fill(grid, row, col, value):
 # ---------------------------------------------------------------------------
 
 _TOOL_LABELS  = ('Paint  [P]', 'Bucket [B]')
-_CELL_LABELS  = ('Occupied [O]', 'Free     [F]')
+_CELL_LABELS  = ('Free     [F]', 'Unknown  [U]', 'Obstacle [O]')
 _SHAPE_LABELS = ('Square', 'Circle')
 
 _UndoState = namedtuple('_UndoState', ['grid', 'x_min', 'y_min', 'res'])
@@ -262,11 +273,11 @@ _UndoState = namedtuple('_UndoState', ['grid', 'x_min', 'y_min', 'res'])
 
 class OccupancyGridEditor:
     """
-    Matplotlib-based paint editor for a binary occupancy grid.
+    Matplotlib-based paint editor for a tri-class occupancy grid.
 
-    Grid  : 0 = free (white),  1 = occupied (black)
+    Grid  : 0 = free (white),  1 = unknown (black),  2 = obstacle (red)
     Display: imshow origin='lower'  (Y increases upward)
-    PNG out: vertically flipped; occupied → black (0), free → white (255)
+    PNG out: vertically flipped; saved as RGB (white / black / red)
     """
 
     _MAX_UNDO = 20
@@ -285,7 +296,7 @@ class OccupancyGridEditor:
         self.out   = output_path
 
         self.tool        = 'paint'
-        self.cell_type   = 'occupied'
+        self.cell_type   = 'free'
         self.brush_shape = 'square'
         self.brush_r     = 0
         self.painting    = False
@@ -330,20 +341,20 @@ class OccupancyGridEditor:
         self.radio_tool.on_clicked(self._on_radio_tool)
 
         self._make_hdr(SL, SW, 0.78, 'Cell')
-        ax_cell = self._sidebar_ax(SL, SW, 0.67, 0.11)
+        ax_cell = self._sidebar_ax(SL, SW, 0.63, 0.15)
         self.radio_cell = mwidgets.RadioButtons(ax_cell, _CELL_LABELS, active=0)
         self._style_radio(self.radio_cell, ax_cell)
         self.radio_cell.on_clicked(self._on_radio_cell)
 
-        self._make_hdr(SL, SW, 0.63, 'Shape')
-        ax_shape = self._sidebar_ax(SL, SW, 0.52, 0.11)
+        self._make_hdr(SL, SW, 0.59, 'Shape')
+        ax_shape = self._sidebar_ax(SL, SW, 0.48, 0.11)
         self.radio_shape = mwidgets.RadioButtons(ax_shape, _SHAPE_LABELS, active=0)
         self._style_radio(self.radio_shape, ax_shape)
         self.radio_shape.on_clicked(self._on_radio_shape)
 
         # Brush radius slider
-        self._make_hdr(SL, SW, 0.48, 'Brush Size')
-        ax_sl = self._sidebar_ax(SL + 0.01, SW - 0.04, 0.43, 0.04)
+        self._make_hdr(SL, SW, 0.44, 'Brush Size')
+        ax_sl = self._sidebar_ax(SL + 0.01, SW - 0.04, 0.39, 0.04)
         self._brush_slider = mwidgets.Slider(
             ax_sl, '', 0, 20, valinit=0, valstep=1,
             color=_C['slider'])
@@ -359,8 +370,8 @@ class OccupancyGridEditor:
         self._brush_slider.on_changed(self._on_brush_slider)
 
         # Cell size header + text input + Go button
-        self._make_hdr(SL, SW, 0.39, 'Cell size (m)')
-        ax_res = self._sidebar_ax(SL, SW * 0.64, 0.34, 0.04)
+        self._make_hdr(SL, SW, 0.350, 'Cell size (m)')
+        ax_res = self._sidebar_ax(SL, SW * 0.64, 0.305, 0.04)
         ax_res.set_facecolor('#FFFFFF')
         for sp in ax_res.spines.values():
             sp.set_color(_C['divider']); sp.set_linewidth(1)
@@ -368,44 +379,54 @@ class OccupancyGridEditor:
         self._res_box.on_submit(lambda _: self._recalculate(None))
 
         self._btn_go = self._make_btn(
-            SL + SW * 0.66, 0.34, SW * 0.34, 0.04,
+            SL + SW * 0.66, 0.305, SW * 0.34, 0.04,
             'Go', _C['go'][0], _C['go'][1], fontsize=8)
         self._btn_go.on_clicked(self._recalculate)
 
         # Divider line
         from matplotlib.lines import Line2D as L2
         self.fig.add_artist(L2(
-            [SL, SL + SW], [0.325, 0.325],
+            [SL, SL + SW], [0.295, 0.295],
             transform=self.fig.transFigure,
             color=_C['divider'], linewidth=1, zorder=50))
 
-        # Action buttons
+        # Action buttons (6 buttons, each h=0.042, gaps=0.005)
+        self._btn_islands = self._make_btn(
+            SL, 0.245, SW, 0.042,
+            'Remove Islands  [I]', _C['islands'][0], _C['islands'][1], fontsize=7)
+        self._btn_islands.on_clicked(self._remove_islands)
+
+        self._btn_frontier = self._make_btn(
+            SL, 0.198, SW, 0.042,
+            'Frontier Layer  [L]', _C['frontier'][0], _C['frontier'][1], fontsize=7)
+        self._btn_frontier.on_clicked(self._add_frontier_layer)
+
         self._btn_soften = self._make_btn(
-            SL, 0.25, SW, 0.07,
+            SL, 0.151, SW, 0.042,
             'Soften  [K]', _C['soften'][0], _C['soften'][1])
         self._btn_soften.on_clicked(self._do_soften)
 
         self._btn_undo = self._make_btn(
-            SL, 0.16, SW, 0.07,
+            SL, 0.104, SW, 0.042,
             'Undo  [Ctrl+Z]', _C['undo'][0], _C['undo'][1])
         self._btn_undo.on_clicked(self._undo)
 
         self._btn_save = self._make_btn(
-            SL, 0.07, SW, 0.07,
+            SL, 0.057, SW, 0.042,
             'Save & Quit  [S]', _C['save'][0], _C['save'][1])
         self._btn_save.on_clicked(self._save_and_quit)
 
         self._btn_quit = self._make_btn(
-            SL, 0.01, SW, 0.05,
+            SL, 0.010, SW, 0.042,
             'Quit  [Q]', _C['quit'][0], _C['quit'][1])
         self._btn_quit.on_clicked(lambda _: plt.close(self.fig))
 
         # ---- Main image ---------------------------------------------------
         self.ax = self.fig.add_axes([0.20, 0.05, 0.77, 0.90])
         self.ax.set_facecolor(_C['main_bg'])
-        cmap = ListedColormap(['white', 'black'])
+        cmap = ListedColormap(['white', 'black', 'red'])
         self.im = self.ax.imshow(
-            self.grid, cmap=cmap, vmin=0, vmax=1,
+            self.grid, cmap=cmap, vmin=0, vmax=2,
             origin='lower',
             extent=[x_min, x_max, y_min, y_max],
             interpolation='none',
@@ -600,10 +621,21 @@ class OccupancyGridEditor:
 
     def _do_soften(self, _e=None):
         """
-        Three-pass morphological clean-up (4-connected cross kernel):
-          close ×2 → fills holes / joins nearby walls
-          open  ×2 → removes thin spurs & isolated cells
-          close ×1 → repairs over-erosion at edges
+        Morphological clean-up of the free/unknown boundary.
+
+        Algorithm (applied to the binary free=0 / unknown=1 grid):
+          open  ×1  – removes isolated unknown specks inside free space and
+                      thin unknown spurs (noise elimination before filling)
+          close ×2  – fills small free gaps inside unknown regions and
+                      connects nearby unknown wall segments
+          open  ×1  – final smoothing pass to remove over-grown edges
+
+        If a frontier layer (value 2) is present it is stripped before
+        softening and then re-computed on the cleaned grid, so the red
+        contour always stays consistent with the new free/unknown boundary.
+
+        Uses a 4-connected (cross) structuring element for strict
+        4-connectivity, matching the frontier detection and flood-fill tools.
         """
         self._save_undo()
         try:
@@ -611,15 +643,196 @@ class OccupancyGridEditor:
         except ImportError:
             print('scipy required for Soften  (pip install scipy).')
             return
-        s = ndi.generate_binary_structure(2, 1)
-        g = self.grid.astype(bool)
-        g = ndi.binary_closing(g, structure=s, iterations=2)
-        g = ndi.binary_opening(g, structure=s, iterations=2)
-        g = ndi.binary_closing(g, structure=s, iterations=1)
-        self.grid = g.astype(np.uint8)
+
+        had_frontier = np.any(self.grid == 2)
+        # Temporarily collapse frontier back to unknown so soften sees 0/1 only
+        g = self.grid.copy()
+        g[g == 2] = 1
+
+        s = ndi.generate_binary_structure(2, 1)   # 4-connected cross kernel
+        b = g.astype(bool)                         # True = unknown/wall
+        b = ndi.binary_opening(b,  structure=s, iterations=1)  # remove specks/spurs
+        b = ndi.binary_closing(b,  structure=s, iterations=2)  # fill gaps, join walls
+        b = ndi.binary_opening(b,  structure=s, iterations=1)  # smooth edges
+        self.grid = b.astype(np.uint8)
+
+        if had_frontier:
+            self.grid[self._frontier_mask(ndi)] = 2
+
         self.im.set_data(self.grid)
         self.fig.canvas.draw_idle()
         print('Map softened.')
+
+    # -----------------------------------------------------------------------
+    # Frontier / obstacle layer
+    # -----------------------------------------------------------------------
+
+    def _frontier_mask(self, ndi):
+        """Return boolean mask of unknown cells (1) adjacent to free cells (0)."""
+        free_mask    = self.grid == 0
+        unknown_mask = self.grid == 1
+        struct   = ndi.generate_binary_structure(2, 1)
+        neighbor = ndi.binary_dilation(free_mask, structure=struct, iterations=1)
+        return neighbor & unknown_mask
+
+    def _add_frontier_layer(self, _e=None):
+        """
+        Convert every unknown cell (1) that shares an edge with a free cell (0)
+        into an obstacle cell (2).  This traces a closed red contour that
+        encloses all explored free space.
+        """
+        self._save_undo()
+        try:
+            import scipy.ndimage as ndi
+        except ImportError:
+            print('scipy required for Frontier Layer  (pip install scipy).')
+            return
+
+        frontier = self._frontier_mask(ndi)
+        self.grid[frontier] = 2
+        self.im.set_data(self.grid)
+        self.fig.canvas.draw_idle()
+        print(f'Frontier layer added: {int(frontier.sum()):,} cells marked as obstacle.')
+
+    # -----------------------------------------------------------------------
+    # Remove islands
+    # -----------------------------------------------------------------------
+
+    def _remove_islands(self, _e=None):
+        """
+        Open a dialog to remove obstacle or free space islands based on various conditions.
+        """
+        if self._dialog_open:
+            return
+
+        try:
+            import scipy.ndimage as ndi
+        except ImportError:
+            print('scipy required for Remove Islands  (pip install scipy).')
+            return
+
+        self._dialog_open = True
+        dlg = plt.figure(figsize=(7, 4.5))
+        dlg.canvas.manager.set_window_title('Remove Islands')
+        dlg.patch.set_facecolor(_C['fig_bg'])
+
+        # Type of islands
+        ax_type = dlg.add_axes([0.1, 0.72, 0.8, 0.18])
+        ax_type.set_facecolor(_C['radio_bg'])
+        ax_type.set_title('Target Cells', fontsize=10, color=_C['hdr_text'], pad=5)
+        radio_type = mwidgets.RadioButtons(ax_type, ['Free Space (0)', 'Obstacle/Unknown (1, 2)'])
+        for sp in ax_type.spines.values():
+            sp.set_color(_C['divider']); sp.set_linewidth(0.8)
+
+        # Button 1: Smaller than main one
+        ax_btn1 = dlg.add_axes([0.1, 0.52, 0.8, 0.1])
+        btn1 = mwidgets.Button(ax_btn1, 'Remove Islands Smaller than main one')
+
+        # Button 2: Smaller than [ textbox ] %
+        ax_btn2 = dlg.add_axes([0.1, 0.37, 0.45, 0.1])
+        btn2 = mwidgets.Button(ax_btn2, 'Remove Islands Smaller than')
+        ax_box2 = dlg.add_axes([0.57, 0.37, 0.15, 0.1])
+        box2 = mwidgets.TextBox(ax_box2, '', initial='10')
+        for sp in ax_box2.spines.values():
+            sp.set_color(_C['divider']); sp.set_linewidth(0.8)
+        dlg.text(0.74, 0.42, '% of main one', va='center', ha='left', fontsize=10, color=_C['hdr_text'])
+
+        # Button 3: Smaller than [ textbox ] cells
+        ax_btn3 = dlg.add_axes([0.1, 0.22, 0.45, 0.1])
+        btn3 = mwidgets.Button(ax_btn3, 'Remove Islands Smaller than')
+        ax_box3 = dlg.add_axes([0.57, 0.22, 0.15, 0.1])
+        box3 = mwidgets.TextBox(ax_box3, '', initial='100')
+        for sp in ax_box3.spines.values():
+            sp.set_color(_C['divider']); sp.set_linewidth(0.8)
+        dlg.text(0.74, 0.27, 'cells', va='center', ha='left', fontsize=10, color=_C['hdr_text'])
+
+        # Cancel
+        ax_cancel = dlg.add_axes([0.4, 0.05, 0.2, 0.1])
+        btn_cancel = mwidgets.Button(ax_cancel, 'Cancel')
+
+        def _close(event=None):
+            self._dialog_open = False
+            plt.close(dlg)
+
+        def _do_remove(cond, x_val_str=''):
+            x_val = 0.0
+            if cond != 'main':
+                try:
+                    x_val = float(x_val_str)
+                except ValueError:
+                    print("Invalid number entered.")
+                    return
+
+            typ = radio_type.value_selected
+            self._save_undo()
+            
+            had_frontier = np.any(self.grid == 2)
+            g = self.grid.copy()
+            g[g == 2] = 1   # collapse frontier to unknown
+            
+            is_free = (typ == 'Free Space (0)')
+            
+            mask = (g == 0) if is_free else (g == 1)
+            struct = ndi.generate_binary_structure(2, 1)   # 4-connected
+            labeled, n = ndi.label(mask, structure=struct)
+            
+            if n <= 1:
+                lbl_str = 'free space' if is_free else 'obstacle/unknown'
+                print(f'No islands to remove — {lbl_str} is already a single region.')
+                self._undo_stack.pop()
+                self._refresh_undo_btn()
+                _close()
+                return
+                
+            counts = ndi.sum(mask, labeled, range(1, n + 1))
+            largest_label = int(np.argmax(counts)) + 1
+            main_size = counts[largest_label - 1]
+            
+            to_remove = np.zeros_like(mask, dtype=bool)
+            
+            for i, count in enumerate(counts):
+                lbl = i + 1
+                if lbl == largest_label:
+                    continue # Keep main one
+                
+                remove_it = False
+                if cond == 'main':
+                    remove_it = True
+                elif cond == 'percent':
+                    if count < (x_val / 100.0) * main_size:
+                        remove_it = True
+                elif cond == 'cells':
+                    if count < x_val:
+                        remove_it = True
+                        
+                if remove_it:
+                    to_remove |= (labeled == lbl)
+                    
+            if is_free:
+                g[to_remove] = 1 # turn free islands to unknown
+            else:
+                g[to_remove] = 0 # turn unknown islands to free
+
+            self.grid = g
+            if had_frontier:
+                self.grid[self._frontier_mask(ndi)] = 2
+                
+            self.im.set_data(self.grid)
+            self.fig.canvas.draw_idle()
+            n_removed = int(to_remove.sum())
+            print(f'Removed {n_removed:,} cells belonging to {"free" if is_free else "obstacle/unknown"} islands.')
+            _close()
+
+        btn1.on_clicked(lambda _: _do_remove('main'))
+        btn2.on_clicked(lambda _: _do_remove('percent', box2.text))
+        btn3.on_clicked(lambda _: _do_remove('cells', box3.text))
+        btn_cancel.on_clicked(_close)
+        dlg.canvas.mpl_connect('close_event', _close)
+        
+        # Keep widgets alive to avoid garbage collection
+        dlg.widgets = [radio_type, btn1, btn2, box2, btn3, box3, btn_cancel]
+        
+        plt.show(block=False)
 
     # -----------------------------------------------------------------------
     # Brush
@@ -706,7 +919,12 @@ class OccupancyGridEditor:
         self.tool = 'paint' if label == _TOOL_LABELS[0] else 'bucket'
 
     def _on_radio_cell(self, label):
-        self.cell_type = 'occupied' if label == _CELL_LABELS[0] else 'free'
+        if label == _CELL_LABELS[0]:
+            self.cell_type = 'free'
+        elif label == _CELL_LABELS[1]:
+            self.cell_type = 'unknown'
+        else:
+            self.cell_type = 'obstacle'
 
     def _on_radio_shape(self, label):
         self.brush_shape = 'square' if label == _SHAPE_LABELS[0] else 'circle'
@@ -724,8 +942,9 @@ class OccupancyGridEditor:
 
     def _set_cell_type(self, cell_type):
         self.cell_type = cell_type
+        idx = {'free': 0, 'unknown': 1, 'obstacle': 2}.get(cell_type, 0)
         try:
-            self.radio_cell.set_active(0 if cell_type == 'occupied' else 1)
+            self.radio_cell.set_active(idx)
         except Exception:
             pass
 
@@ -786,7 +1005,9 @@ class OccupancyGridEditor:
             self._cursor_shape = None
 
         self.fig.canvas.draw_idle()
-        print(f'  Done: {nrows}\xd7{ncols}  occupied={grid.mean() * 100:.1f}%')
+        print(f'  Done: {nrows}\xd7{ncols}  '
+              f'free={np.mean(grid == 0) * 100:.1f}%  '
+              f'unknown={np.mean(grid == 1) * 100:.1f}%')
 
     # -----------------------------------------------------------------------
     # Mouse / keyboard events
@@ -808,7 +1029,7 @@ class OccupancyGridEditor:
         if row is None:
             return
         self._save_undo()
-        value = 1 if self.cell_type == 'occupied' else 0
+        value = {'free': 0, 'unknown': 1, 'obstacle': 2}[self.cell_type]
         if self.tool == 'bucket':
             flood_fill(self.grid, row, col, value)
             self.im.set_data(self.grid)
@@ -835,7 +1056,7 @@ class OccupancyGridEditor:
         if self.painting and event.inaxes is self.ax:
             row, col = self._event_to_rc(event)
             if row is not None:
-                value = 1 if self.cell_type == 'occupied' else 0
+                value = {'free': 0, 'unknown': 1, 'obstacle': 2}[self.cell_type]
                 if self.last_rc is not None:
                     self._paint_segment(self.last_rc[0], self.last_rc[1],
                                         row, col, value)
@@ -874,9 +1095,12 @@ class OccupancyGridEditor:
         k = event.key
         if   k == 'p':       self._set_tool('paint')
         elif k == 'b':       self._set_tool('bucket')
-        elif k == 'o':       self._set_cell_type('occupied')
         elif k == 'f':       self._set_cell_type('free')
+        elif k == 'u':       self._set_cell_type('unknown')
+        elif k == 'o':       self._set_cell_type('obstacle')
         elif k == 'k':       self._do_soften(None)
+        elif k == 'l':       self._add_frontier_layer(None)
+        elif k == 'i':       self._remove_islands(None)
         elif k == 'ctrl+z':  self._undo()
         elif k == 'r':
             self.ax.set_xlim(self._full_xlim)
@@ -895,13 +1119,26 @@ class OccupancyGridEditor:
 
     def _save_and_quit(self, _e):
         nrows, ncols = self.grid.shape
-        img    = np.flipud(self.grid)
-        pixels = ((1 - img) * 255).astype(np.uint8)
+        img = np.flipud(self.grid)
+
+        # Map grid values to RGB:
+        #   0 = free     → white  (255, 255, 255)
+        #   1 = unknown  → black  (  0,   0,   0)
+        #   2 = obstacle → red    (255,   0,   0)
+        rgb_palette = np.array([[255, 255, 255],
+                                 [  0,   0,   0],
+                                 [255,   0,   0]], dtype=np.uint8)
+        pixels = rgb_palette[np.clip(img, 0, 2)]
+        
+        out_dir = os.path.dirname(self.out)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            
         try:
             from PIL import Image
-            Image.fromarray(pixels, mode='L').save(self.out)
+            Image.fromarray(pixels, mode='RGB').save(self.out)
         except ImportError:
-            plt.imsave(self.out, img.astype(float), cmap='gray_r', vmin=0, vmax=1)
+            plt.imsave(self.out, pixels.astype(np.float32) / 255.0)
         print(f'Saved {nrows}\xd7{ncols} occupancy grid \u2192 {self.out}')
         plt.close(self.fig)
 
@@ -940,7 +1177,9 @@ def main():
     args = parser.parse_args()
 
     if args.output is None:
-        args.output = os.path.splitext(args.pcd)[0] + '.png'
+        basename = os.path.basename(args.pcd)
+        name = os.path.splitext(basename)[0]
+        args.output = os.path.join('grids', name + '.png')
 
     print(f'Reading {args.pcd} ...')
     x, y, z = read_pcd(args.pcd)
@@ -980,7 +1219,8 @@ def main():
     nrows, ncols = grid.shape
     print(f'  Grid size   : {nrows}\xd7{ncols}  '
           f'({nrows * args.resolution:.1f} m \xd7 {ncols * args.resolution:.1f} m)')
-    print(f'  Occupied    : {grid.mean() * 100:.1f}%')
+    print(f'  Free        : {np.mean(grid == 0) * 100:.1f}%')
+    print(f'  Unknown     : {np.mean(grid == 1) * 100:.1f}%')
     print(f'  Output path : {args.output}')
 
     print('Opening editor ...')

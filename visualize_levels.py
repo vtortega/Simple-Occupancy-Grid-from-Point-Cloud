@@ -368,10 +368,12 @@ def main():
     assignments = assign_levels(z, levels, below=args.below, above=args.above)
 
     # Save each level as a separate PCD file
-    base = os.path.splitext(args.pcd)[0]
+    base_name = os.path.splitext(os.path.basename(args.pcd))[0]
+    out_dir = "point_clouds"
+    os.makedirs(out_dir, exist_ok=True)
     for i, (z_c, cnt) in enumerate(levels):
         mask = assignments == i
-        out_path = f"{base}_L{i + 1}.pcd"
+        out_path = os.path.join(out_dir, f"{base_name}_L{i + 1}.pcd")
         save_pcd_binary(out_path, x[mask], y[mask], z[mask])
         print(f"  Saved L{i + 1} → {out_path}  ({mask.sum():,} pts)")
 
